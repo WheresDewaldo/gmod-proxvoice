@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProxVoice</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <span class="eyebrow">TTT proximity voice</span>
+    <h1>ProxVoice</h1>
+  </header>
+
+  <!-- Step 1: set up mic -->
+  <section id="setup" class="card">
+    <h2>Join voice</h2>
+    <label for="name">Display name</label>
+    <input id="name" maxlength="32" placeholder="Shown until you link your Steam account">
+    <label for="mic">Microphone</label>
+    <select id="mic"><option value="">Default microphone</option></select>
+    <p class="note">Using NVIDIA Broadcast or Krisp? Pick its microphone here and turn off <b>Browser noise suppression</b> below so audio isn't processed twice.</p>
+    <label class="check"><input type="checkbox" id="ns" checked> Browser noise suppression</label>
+    <label class="check"><input type="checkbox" id="ec" checked> Echo cancellation (leave on unless you use headphones only)</label>
+    <button id="join" class="primary" type="button">Join voice</button>
+    <p id="setup-err" class="err" hidden></p>
+  </section>
+
+  <!-- Step 2: link -->
+  <section id="link" class="card" hidden>
+    <h2>Link your game</h2>
+    <p>Type this in Garry's Mod chat:</p>
+    <div class="code"><span>!voice</span> <strong id="code">-----</strong></div>
+    <p class="note">The code expires after 10 minutes. <button id="newcode" class="link" type="button">Get a new code</button></p>
+  </section>
+
+  <!-- Step 3: in voice -->
+  <section id="live" class="card" hidden>
+    <div class="row">
+      <h2 id="me-name">In voice</h2>
+      <span id="status" class="pill">Lobby</span>
+    </div>
+    <div class="row">
+      <button id="mute" type="button">Mute mic</button>
+      <div class="meter" aria-label="Your mic level"><i id="mylevel"></i></div>
+    </div>
+    <h3>Players</h3>
+    <ul id="peers" class="peers"><li class="empty">Nobody else is linked yet.</li></ul>
+    <p class="note">Bars show how loud each player is to you right now. Outside a round everyone hears everyone.</p>
+  </section>
+
+  <p class="foot"><a href="demo.html">Try the offline demo</a> to hear distance and direction with simulated players.</p>
+</main>
+<script type="module" src="client.js"></script>
+</body>
+</html>

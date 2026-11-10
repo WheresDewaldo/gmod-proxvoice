@@ -1,0 +1,34 @@
+# ProxVoice + Caddy (automatic HTTPS) + optional coturn relay.
+# Browsers only allow microphone access over HTTPS, so a domain is required for real use.
+#   1. Point a DNS name (e.g. voice.example.com) at this machine; open ports 80, 443, 3478 (tcp+udp).
+#   2. cp .env.sample .env and fill it in, set DOMAIN below.
+#   3. docker compose up -d
+services:
+  proxvoice:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    ports:
+      - "8090:8090"   # the GMod server posts here (can be LAN-only)
+
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    command: caddy reverse-proxy --from ${DOMAIN:-voice.example.com} --to proxvoice:8090
+    volumes: [caddy_data:/data]
+
+  # Relay for players whose home network blocks direct connections. Enable with:
+  #   docker compose --profile turn up -d   and set TURN_URL/TURN_USERNAME/TURN_CREDENTIAL in .env
+  coturn:
+    image: coturn/coturn:4.6
+    profiles: ["turn"]
+    restart: unless-stopped
+    network_mode: host
+    command: >
+      -n --listening-port=3478 --fingerprint --lt-cred-mech
+      --user=${TURN_USERNAME:-proxvoice}:${TURN_CREDENTIAL:-change-me}
+      --realm=proxvoice --min-port=49160 --max-port=49200
+
+volumes:
+  caddy_data:

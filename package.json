@@ -1,0 +1,16 @@
+{
+  "name": "gmod-proxvoice",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Positional proximity voice chat for Garry's Mod TTT, in the browser",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test test/*.test.js",
+    "fake-game": "node scripts/fake-game.js"
+  },
+  "dependencies": {
+    "ws": "8.18.0"
+  }
+}

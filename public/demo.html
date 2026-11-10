@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProxVoice Demo</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  .stage { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 18px; align-items: start; }
+  @media (max-width: 800px) { .stage { grid-template-columns: 1fr; } }
+  canvas { width: 100%; aspect-ratio: 1; display: block; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); touch-action: none; }
+  kbd { font: 12px ui-monospace, monospace; background: var(--chip); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
+  .bots li { grid-template-columns: 12px minmax(0, 1fr) 90px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+</style>
+</head>
+<body>
+<main class="wrap wide">
+  <header>
+    <span class="eyebrow">Offline demo · no server needed</span>
+    <h1>ProxVoice Demo</h1>
+    <p class="note">Four simulated players are talking as they wander the map. Use headphones to hear left and right. This runs the same volume model the server uses.</p>
+  </header>
+  <div class="stage">
+    <canvas id="map" aria-label="Top-down map. You are the white arrow."></canvas>
+    <div class="card">
+      <button id="start" class="primary" type="button">Start audio</button>
+      <p class="note">Move with <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>, turn with <kbd>←</kbd><kbd>→</kbd> or <kbd>Q</kbd><kbd>E</kbd>. You can also drag yourself on the map.</p>
+      <label class="check"><input type="checkbox" id="dead"> I'm dead (spectating)</label>
+      <label class="check"><input type="checkbox" id="round" checked> Round in progress</label>
+      <label class="check"><input type="checkbox" id="freeze"> Freeze the other players</label>
+      <h3>What you hear</h3>
+      <ul id="bots" class="peers bots"></ul>
+      <p class="note">Grey blocks are walls; voices behind them are muffled.</p>
+    </div>
+  </div>
+</main>
+<script type="module">
+import { computeMix, DEFAULTS } from './audio-model.js';
+
+const W = 4000, cv = document.getElementById('map'), g = cv.getContext('2d');
+const me = { x: 2000, y: 2000, z: 0, yaw: 90, alive: true };
+const walls = [ [1200, 900, 1500, 1700], [2500, 2300, 3300, 2550], [600, 2800, 1400, 3050] ]; // x1,y1,x2,y2
+const BOTS = [
+  { name: 'Rook',  color: '#3b82f6', pitch: 105 },
+  { name: 'Juno',  color: '#e64980', pitch: 210 },
+  { name: 'Pike',  color: '#2f9e44', pitch: 130 },
+  { name: 'Sable', color: '#ae3ec9', pitch: 185 },
+].map((b, i) => ({ ...b, id: 'b' + i, x: 800 + i * 800, y: 700 + (i % 2) * 2400, z: 0, alive: true, gx: 0, gy: 0, wait: 0 }));
+const keys = new Set();
+let ctx = null, mix = {};
+
+// ---------- synthetic voices: a buzzing source through two moving formant filters ----------
+function makeVoice(bot) {
+  const src = ctx.createOscillator(); src.type = 'sawtooth'; src.frequency.value = bot.pitch;
+  const f1 = ctx.createBiquadFilter(); f1.type = 'bandpass'; f1.Q.value = 6;
+  const f2 = ctx.createBiquadFilter(); f2.type = 'bandpass'; f2.Q.value = 8;
+  const env = ctx.createGain(); env.gain.value = 0;
+  const muffle = ctx.createBiquadFilter(); muffle.type = 'lowpass'; muffle.frequency.value = 12000;
+  const gain = ctx.createGain(); gain.gain.value = 0;
+  const pan = ctx.createStereoPanner();
+  src.connect(f1); src.connect(f2); f1.connect(env); f2.connect(env);
+  env.connect(muffle).connect(gain).connect(pan).connect(ctx.destination);
+  src.start();
+  bot.audio = { src, f1, f2, env, gain, pan, muffle };
+  const VOWELS = [[730, 1090], [270, 2290], [530, 1840], [570, 840], [300, 870], [660, 1720]];
+  const talk = () => {
+    // a "sentence" of 4-12 syllables, then a pause
+    let t = ctx.currentTime + 0.05;
+    const n = 4 + Math.floor(Math.random() * 9);
+    for (let i = 0; i < n; i++) {
+      const [a, b] = VOWELS[Math.floor(Math.random() * VOWELS.length)];
+      const d = 0.09 + Math.random() * 0.16;
+      f1.frequency.setTargetAtTime(a, t, 0.02); f2.frequency.setTargetAtTime(b, t, 0.02);
+      src.frequency.setTargetAtTime(bot.pitch * (0.9 + Math.random() * 0.25), t, 0.05);
+      env.gain.setTargetAtTime(0.9, t, 0.015); env.gain.setTargetAtTime(0.05, t + d, 0.03);
+      t += d + 0.04;
+    }
+    env.gain.setTargetAtTime(0, t, 0.05);
+    bot.talking = [ctx.currentTime, t];
+    setTimeout(talk, (t - ctx.currentTime) * 1000 + 600 + Math.random() * 2200);
+  };
+  setTimeout(talk, Math.random() * 1500);
+}
+
+document.getElementById('start').onclick = e => {
+  if (ctx) { ctx.state === 'running' ? ctx.suspend() : ctx.resume(); e.target.textContent = ctx.state === 'running' ? 'Start audio' : 'Pause audio'; return; }
+  ctx = new AudioContext();
+  BOTS.forEach(makeVoice);
+  e.target.textContent = 'Pause audio';
+};
+document.getElementById('dead').onchange = e => { me.alive = !e.target.checked; };
+
+// ---------- occlusion: does the segment me->bot cross any wall rectangle? ----------
+function segHitsRect(ax, ay, bx, by, [x1, y1, x2, y2]) {
+  let t0 = 0, t1 = 1; const dx = bx - ax, dy = by - ay;
+  for (const [p, q] of [[-dx, ax - x1], [dx, x2 - ax], [-dy, ay - y1], [dy, y2 - ay]]) {
+    if (p === 0) { if (q < 0) return false; continue; }
+    const r = q / p;
+    if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; } else { if (r < t0) return false; if (r < t1) t1 = r; }
+  }
+  return true;
+}
+const inWall = (x, y) => walls.some(([x1, y1, x2, y2]) => x > x1 - 40 && x < x2 + 40 && y > y1 - 40 && y < y2 + 40);
+
+// ---------- simulation ----------
+let last = performance.now(), mixTimer = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  // you
+  const turn = (keys.has('ArrowLeft') || keys.has('q') ? 1 : 0) - (keys.has('ArrowRight') || keys.has('e') ? 1 : 0);
+  me.yaw = (me.yaw + turn * 140 * dt + 360) % 360;
+  const f = (keys.has('w') ? 1 : 0) - (keys.has('s') ? 1 : 0), s = (keys.has('a') ? 1 : 0) - (keys.has('d') ? 1 : 0);
+  if (f || s) {
+    const r = me.yaw * Math.PI / 180, sp = 320 * dt;
+    // Source axes: forward = (cos, sin), left = (-sin, cos)
+    const nx = me.x + (Math.cos(r) * f - Math.sin(r) * s) * sp, ny = me.y + (Math.sin(r) * f + Math.cos(r) * s) * sp;
+    if (!inWall(nx, ny)) { me.x = Math.max(50, Math.min(W - 50, nx)); me.y = Math.max(50, Math.min(W - 50, ny)); }
+  }
+  // bots wander between random points, pausing now and then
+  if (!document.getElementById('freeze').checked) for (const b of BOTS) {
+    if (b.wait > 0) { b.wait -= dt; continue; }
+    const dx = b.gx - b.x, dy = b.gy - b.y, d = Math.hypot(dx, dy);
+    if (d < 30 || !b.gx) { b.gx = 200 + Math.random() * (W - 400); b.gy = 200 + Math.random() * (W - 400); b.wait = Math.random() * 3; continue; }
+    const nx = b.x + dx / d * 200 * dt, ny = b.y + dy / d * 200 * dt;
+    if (inWall(nx, ny)) { b.gx = 0; continue; }
+    b.x = nx; b.y = ny;
+  }
+  // recompute the mix at 10 Hz, like the server
+  mixTimer += dt;
+  if (mixTimer >= 0.1) {
+    mixTimer = 0;
+    const others = new Map(BOTS.map(b => [b.id, { ...b, occluded: walls.some(w => segHitsRect(me.x, me.y, b.x, b.y, w)) }]));
+    mix = computeMix(me, others, document.getElementById('round').checked);
+    if (ctx) for (const b of BOTS) {
+      const m = mix[b.id], t = ctx.currentTime;
+      b.audio.gain.gain.setTargetAtTime(m.g * 0.5, t, 0.08);
+      b.audio.pan.pan.setTargetAtTime(m.p, t, 0.08);
+      b.audio.muffle.frequency.setTargetAtTime(others.get(b.id).occluded ? 900 : 12000, t, 0.1);
+    }
+    renderList(others);
+  }
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function renderList(others) {
+  document.getElementById('bots').innerHTML = BOTS.map(b => {
+    const m = mix[b.id] || { g: 0, p: 0 };
+    const side = Math.abs(m.p) < 0.15 ? 'center' : m.p < 0 ? 'left' : 'right';
+    const wall = others.get(b.id).occluded && m.g > 0 ? ', through a wall' : '';
+    return `<li><span class="dot" style="background:${b.color}"></span><span class="pname">${b.name} <span class="conn">${m.g > 0 ? side + wall : 'out of range'}</span></span><div class="bar"><i style="width:${Math.round(m.g * 100)}%"></i></div></li>`;
+  }).join('');
+}
+
+// ---------- drawing ----------
+const tok = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function draw() {
+  const r = cv.getBoundingClientRect(), dpr = devicePixelRatio || 1, px = Math.round(r.width * dpr);
+  if (cv.width !== px) { cv.width = px; cv.height = px; }
+  const sc = px / W, sy = y => (W - y) * sc, line = tok('--line'), ink = tok('--ink'), panel = tok('--panel');
+  g.fillStyle = panel; g.fillRect(0, 0, px, px);
+  g.strokeStyle = line; g.lineWidth = 1;
+  for (let u = 0; u <= W; u += 500) { g.beginPath(); g.moveTo(u * sc, 0); g.lineTo(u * sc, px); g.moveTo(0, u * sc); g.lineTo(px, u * sc); g.stroke(); }
+  // hearing range
+  g.fillStyle = tok('--accent'); g.globalAlpha = me.alive ? 0.08 : 0;
+  g.beginPath(); g.arc(me.x * sc, sy(me.y), DEFAULTS.far * sc, 0, 7); g.fill();
+  g.globalAlpha = me.alive ? 0.14 : 0; g.beginPath(); g.arc(me.x * sc, sy(me.y), DEFAULTS.near * sc, 0, 7); g.fill(); g.globalAlpha = 1;
+  g.fillStyle = tok('--muted'); for (const [x1, y1, x2, y2] of walls) g.fillRect(x1 * sc, sy(y2), (x2 - x1) * sc, (y2 - y1) * sc);
+  // Source +y points up-screen (to your left when facing right), so y is flipped for display via sy()
+  const rad = Math.max(7, px / 80);
+  g.font = `600 ${Math.max(11, px / 55)}px system-ui, sans-serif`; g.textAlign = 'center';
+  for (const b of BOTS) {
+    const m = mix[b.id] || { g: 0 }, talking = ctx && b.talking && ctx.currentTime < b.talking[1];
+    if (talking && m.g > 0) { g.strokeStyle = b.color; g.lineWidth = 2; g.globalAlpha = 0.5; g.beginPath(); g.arc(b.x * sc, sy(b.y), rad * 2, 0, 7); g.stroke(); g.globalAlpha = 1; }
+    g.fillStyle = b.color; g.beginPath(); g.arc(b.x * sc, sy(b.y), rad, 0, 7); g.fill();
+    g.fillStyle = ink; g.fillText(b.name, b.x * sc, sy(b.y) - rad - 5);
+  }
+  // you: arrow pointing along yaw; canvas rotation is clockwise, Source yaw counter-clockwise
+  const a = -me.yaw * Math.PI / 180;
+  g.save(); g.translate(me.x * sc, sy(me.y)); g.rotate(a);
+  g.fillStyle = me.alive ? ink : tok('--bad'); g.beginPath(); g.moveTo(rad * 1.8, 0); g.lineTo(-rad, rad); g.lineTo(-rad * 0.4, 0); g.lineTo(-rad, -rad); g.closePath(); g.fill();
+  g.restore();
+}
+
+// ---------- input ----------
+addEventListener('keydown', e => { const k = e.key.length === 1 ? e.key.toLowerCase() : e.key; if (['w','a','s','d','q','e','ArrowLeft','ArrowRight'].includes(k)) { keys.add(k); e.preventDefault(); } });
+addEventListener('keyup', e => keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key));
+addEventListener('blur', () => keys.clear());
+let dragging = false;
+const toMap = e => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) / r.width * W, W - (e.clientY - r.top) / r.height * W]; };
+cv.addEventListener('pointerdown', e => { const [x, y] = toMap(e); if (Math.hypot(x - me.x, y - me.y) < 250) { dragging = true; cv.setPointerCapture(e.pointerId); } });
+cv.addEventListener('pointermove', e => { if (!dragging) return; const [x, y] = toMap(e); if (!inWall(x, y)) { me.x = x; me.y = y; } });
+cv.addEventListener('pointerup', () => (dragging = false));
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
